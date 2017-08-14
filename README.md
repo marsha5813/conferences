@@ -1,0 +1,3 @@
+﻿# Conference presentations
+
+I'm using this repo to dump code from projects that I present at conferences. This is one way I'm trying to be transparent with work that I produce and exhibit at professional meetings. Note that I do not plan to host data here. If you want the data that accompanies any of these projects so you can reproduce exactly what I've presented at a conference, contact me at marsha58@purdue.edu.

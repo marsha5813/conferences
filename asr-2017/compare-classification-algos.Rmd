@@ -1,0 +1,345 @@
+---
+title: "Twitter Sentiment and Religious Geography"
+author: "Joey Marshall"
+date: "August 9, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache = TRUE)
+```
+
+```{r initialize environment, include=FALSE, eval=FALSE}
+# install packages
+install.packages("streamR")
+install.packages("sp")
+install.packages("maps")
+install.packages("maptools")
+install.packages("RJSONIO")
+install.packages("jsonlite", repos="http://cran.r-project.org")
+install.packages("ggplot2")
+install.packages("devtools")
+library(devtools)
+devtools::install_github("timjurka/sentiment/sentiment")
+install.packages("RTextTools")
+install.packages("e1071")
+install.packages("caret")
+install.packages("tidyverse")
+install.packages("stringr")
+install.packages("tm")
+devtools::install_github("sfeuerriegel/SentimentAnalysis")
+install.packages("Rcpp")
+install.packages("slam")
+install.packages("gpclib")
+
+# load libraries
+library(RJSONIO)
+library(jsonlite)
+
+
+# load my functions
+source("functions.R")
+```
+
+# Try various sentiment analysis algos and compare performance
+
+Use this chuck to stream geolocated tweets that fall within a four-sided
+bounding box that encompasses the continental U.S. (with some overlap in Canada, etc.).
+I ran this for several weeks, at different times of the data, to collect as many
+tweets as I wanted.
+```{r data_collect, include=FALSE, eval=FALSE}
+# load libraries
+library(streamR)
+
+# run data collection for all of the United States
+source("data-collect-usa.R")
+
+# parse tweets into a data.frame
+tweets.df = parseTweets("tweets.json", verbose=TRUE)
+```
+
+Load in some pre-labeled tweets for model training and testing
+I got these pre-labeled tweets from http://thinknook.com/wp-content/uploads/2012/09/Sentiment-Analysis-Dataset.zip
+
+The dataset is from http://thinknook.com/twitter-sentiment-analysis-training-corpus-dataset-2012-09-22/, and it's based on data from:
+* The University of Michigan Sentiment Analysis competition on Kaggle
+* The Twitter Sentiment Corpus by Niek Sanders
+
+```{r load_training_data, eval=FALSE}
+# Load the readr package
+install.packages("readr")
+library(readr)
+
+# Load in the pre-labeled data
+labeled_data = read_csv("Sentiment Analysis Dataset.csv")
+```
+
+```{r takesample}
+# Take a tiny sample just for playing around
+tinysample = labeled_data[sample(1:nrow(tweets.df), 10000, replace=FALSE),] 
+
+# convert my text to object of type corpus
+tweetscorpus = corpus(tinysample$SentimentText)
+
+# Assign the true sentiment score labels to a document-level variable
+docvars(tweetscorpus, "trueSentiment") <- tinysample$Sentiment
+```
+
+
+Do sentiment analysis using quanteda and a dictionary of positive and negative words
+These dictionaries are from http://www.cs.uic.edu/~liub/FBS/sentiment-analysis.html
+and were used in some papers. See the text files for citation information
+
+```{r sent_dict}
+library(quanteda)
+
+# Read in the dictionaries of positive and negative words
+positive.terms <- readLines("positive-words.txt")[36:2041]
+negative.terms <- readLines("negative-words.txt")[36:4818]
+
+# prepare a dictionary using the dictionary() function from quanteda
+sentDict = dictionary(list(positive=positive.terms,
+                negative=negative.terms))
+
+# Get english stopwords from quanteda and assign them to a vector
+eng.stopwords = stopwords('english')
+
+# And convert my corpus to a document-frequency (or document-term) matrix
+tweetsdfm = dfm(tweetscorpus,
+         remove_numbers = TRUE, 
+         remove_punct = TRUE,
+         remove_symbols = TRUE,
+         remove_url = TRUE,
+         remove_twitter = TRUE,
+         remove_separators = TRUE,
+         remove=eng.stopwords,
+         tolower = TRUE,
+         dictionary=sentDict)
+
+# Have a look at the dfm
+# head(tweetsdfm)
+
+# And the text
+# tweetscorpus[2]
+
+# Take proportions of positive and negative words
+propPositive = tweetsdfm[,"positive"] / (rowSums(tweetsdfm)+1e-5)
+propPositive = as.vector(round(propPositive,4)) # b/c by default it's sparse
+
+# First get the true labels from the docvar in the tweets corpus
+realSentiments = docvars(tweetscorpus)$trueSentiment
+
+## Create a binary measure of the predicted sentiment
+# If propPositive is greater than .5, the resulting vector equals 1, otherwise 0.
+# Playing with that .5 threshold can help you optimize for accuracy, precision, recall -- whatever you want.
+predsent_dictionary = ifelse(propPositive>0.5, 1, 0)
+performance(true=realSentiments, predicted=predsent_dictionary)
+
+# Can also try relative pos/neg words
+relPositive = tweetsdfm[,"positive"] - tweetsdfm[,"negative"]
+relPositive = as.vector(relPositive)
+
+# Create a decision rule that predicts a positive tweet if relPositive>0
+# Then test performance
+predsent_dictionary2 = ifelse(relPositive>0, 1, 0)
+performance(true=realSentiments, predicted=predsent_dictionary2)
+
+# Can put everything back into a data.frame
+# tinysample$predsent_dictionary = predsent_dictionary
+
+# Can also do a simple correlation between the true and predicted sentiments
+# cor(tinysample$Sentiment, tinysample$predsent_dictionary)
+
+```
+
+Fit a simple logistic regression model
+```{r sent_logit}
+# Parse data into training and test data
+test.obs = sample(ndoc(tweetscorpus),
+               size=floor(0.1*ndoc(tweetscorpus))) # This samples 10 percent of docs
+
+trainData = data.frame(Y=realSentiments[-test.obs],
+                       propPos=propPositive[-test.obs],
+                       relPos=relPositive[-test.obs])
+
+testData = data.frame(Y=realSentiments[test.obs],
+                      propPos=propPositive[test.obs],
+                      relPos=relPositive[test.obs])
+
+# Fit the model
+logitModel = glm(Y~propPos+relPos,
+                 data=trainData,
+                 family="binomial")
+summary(logitModel)
+
+# Now use the predict function to get predicted values for the test set
+testPreds = predict(logitModel,
+                    newdata=testData,
+                    type = "response")
+
+# Convert probabilities to a binary response
+testPredBinary = ifelse(testPreds>0.5,1,0)
+
+# And test performance
+table(testPredBinary,realSentiments[test.obs])
+performance(true = realSentiments[test.obs], predicted = testPredBinary)
+
+# Proportion in each error category. A confusion matrix with proportions rather than raw numbers
+prop.table(table(testPredBinary,realSentiments[test.obs])) # just a proportion in each "error" category
+```
+
+Train a Naive Bayes classifier
+```{r nb}
+library(e1071)
+
+
+# Create the doc-term matrix
+tweetsdfm = dfm(tweetscorpus,
+         remove_numbers = TRUE, 
+         remove_punct = TRUE,
+         remove_symbols = TRUE,
+         remove_url = TRUE,
+         remove_twitter = TRUE,
+         remove_separators = TRUE,
+         remove=eng.stopwords,
+         tolower = TRUE)
+
+# Check matrix sparsity and size
+tweetsdfm
+object.size(tweetsdfm)
+
+# I can't pass a sparse matrix to e1071, so I need to convert to a dense matrix
+# But tather than convert the entire matrix (really costly), I'm going to get
+# rid of infrequent words (words that appear in fewer than 1% of documents)
+tweetsdfmtrim = dfm_trim(tweetsdfm,
+                     min_doc = floor(0.01*ndoc(tweetscorpus)))
+
+# Compare matrices
+tweetsdfm
+object.size(tweetsdfm)
+tweetsdfmtrim
+object.size(tweetsdfmtrim)
+
+# Now convert the matrix to dense
+training.set = as.matrix(tweetsdfmtrim)
+training.set = training.set[,colSums(tweetsdfmtrim)>0] # only keep columns with colsums>0
+training.set = training.set[rowSums(tweetsdfmtrim)>0,] # only keep rows with rowsums>0
+trainingLabels = as.factor(realSentiments)[rowSums(tweetsdfmtrim)>0] # converting real sentiments to factors so R will know they're categories
+
+# Put everything together in a dataframe
+train.obs = sample(nrow(training.set),size=.5*nrow(training.set))
+nbdat = data.frame(training.set[train.obs,],out=as.factor(trainingLabels[train.obs]))
+
+# Fitting the Naive Bayes Model
+J = ncol(nbdat)
+naive.bayes <- naiveBayes(x=nbdat[,-J], # x is everything in nbdat except the target (J)
+                          y=nbdat$out,laplace=0) # the target is the newly-created nbdat$out
+                          # note that laplace helps smooth out zero entries.
+
+## Looking at the predictions from the training set:
+trainPred = predict(naive.bayes,
+                    newdata=nbdat, # for whatever reason, the e1071 wants you to specify "newdata"
+                    type="class")
+
+performance(nbdat$out,trainPred)
+
+# Confusion matrix
+table(trainPred,nbdat$out)
+prop.table(table(trainPred,nbdat$out))
+prop.table(table(trainPred,nbdat$out),margin=1)
+prop.table(table(trainPred,nbdat$out),margin=2)
+
+
+# investigate false negatives
+false_neg = which(nbdat$out ==1,
+                  trainPred == 0)
+
+# and false positives
+false_pos = which(nbdat$out ==0,
+                  trainPred ==1)
+
+dim(nbdat) # what are the dimensions of nbdat
+
+# Should probably try cross-validation using tune() in the e1071 package
+```
+
+
+
+Try several methods using Rtexttools
+```{r other_methods}
+library(RTextTools)
+library(e1071)
+library(quanteda)
+
+# Pull true labels out of the corpus
+realSentiments = docvars(tweetscorpus)$trueSentiment
+
+# Get english stopwords from quanteda and assign them to a vector
+eng.stopwords = stopwords('english')
+
+
+# Create the doc-term matrix
+tweetsdfm = dfm(tweetscorpus,
+         remove_numbers = TRUE, 
+         remove_punct = TRUE,
+         remove_symbols = TRUE,
+         remove_url = TRUE,
+         remove_twitter = TRUE,
+         remove_separators = TRUE,
+         remove=eng.stopwords,
+         tolower = TRUE)
+
+# build the data to specify response variable, train/test sets
+container = create_container(tweetsdfm, as.numeric(realSentiments),
+                             trainSize = 1:(0.8*nrow(tweetsdfm)),
+                             testSize = (0.8*(nrow(tweetsdfm))+1):nrow(tweetsdfm),
+                             virgin = FALSE)
+
+# Train the model with multiple ML algos
+# Possible algos include: "MAXENT" , "SVM", "RF", "BAGGING", "NNET", "TREE
+models = train_models(container, algorithms=c("MAXENT" , "SVM"))
+
+# Classify the testing set
+results = classify_models(container, models)
+
+# Performance results
+performance(realSentiments[(0.8*(nrow(tweetsdfm))+1):nrow(tweetsdfm)],  results[,"MAXENTROPY_LABEL"])
+
+performance(realSentiments[(0.8*(nrow(tweetsdfm))+1):nrow(tweetsdfm)],  results[,"SVM_LABEL"])
+
+# Summarize results using the performance metrics in RTextTools
+analytics = create_analytics(container, results)
+summary(analytics)
+
+# cross-validate
+set.seed(8675309)
+N=4
+cross_validate(container,N,"MAXENT")
+cross_validate(container,N,"SVM")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
