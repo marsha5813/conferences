@@ -1,0 +1,167 @@
+---
+title: "Twitter harassment project"
+author: "Joey Marshall"
+date: "10/4/2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Load libraries
+```{r initialize}
+library(streamR)
+library(quanteda)
+library(tidyverse)
+```
+
+
+### Read in Twitter data
+```{r read_data}
+# Read tweets from JSON file into a dataframe using streamR::parseTweets
+tweets.df = parseTweets("tweets.json", verbose=TRUE)
+
+# Take a look at some tweets
+colnames(tweets.df)
+head(tweets.df$text)
+```
+
+### Inspect tweets using quanteda::kwic
+```{r construct_corpus}
+# Convert text of tweets into a quanteda corpus
+mycorp = corpus(tweets.df$text)
+
+# Take a look at first five documents
+summary(mycorp, n=5)
+
+# Use quanteda::kwic (keywords in context) to search for clues
+kwic(mycorp, "bitch")
+```
+
+### Construct a dictionary of sexual harassment
+```{r construct_dictionary}
+# Read in a dictionary of words associated with harassment
+# I'm just making this list up based on my own guesses and https://en.wikipedia.org/wiki/Category:Slang_terms_for_women
+# Note that I'm putting whitespace before and after some terms because those combinations of letters appear in lots of other words
+harassment.terms <- readLines("sexual-harassment-words.txt")
+harassment.terms
+```
+
+### See how often the harassing words occur in the data
+```{r classify_dictionary}
+# Use grepl to search for expressions in harassment.terms
+results.df = sapply(harassment.terms, grepl, tweets.df$text, ignore.case=TRUE)
+results.df = as.data.frame(results.df)
+
+# See results
+summary(results.df)
+
+# Make syntactically valid column names
+colnames(results.df) = make.names(colnames(results.df))
+
+# Merge results back into the dataframe (tweets.df and results.df should have same N)
+tweets.df = cbind(tweets.df, results.df)
+
+# Create a flag if the tweets contains any instance of harassment
+tweets.df$isharassment <- rowSums(tweets.df[,make.names(harassment.terms)])
+tweets.df$isharassment <- ifelse(tweets.df$isharassment>0,1,0)
+
+# Create a flag if the tweets contains any instance of harassment except "bitch"
+terms = harassment.terms[-1]
+tweets.df$isharassment2 <- rowSums(tweets.df[,make.names(terms)])
+tweets.df$isharassment2 <- ifelse(tweets.df$isharassment2>0,1,0)
+
+# How many tweets contain harassment?
+sum(tweets.df$isharassment)
+sum(tweets.df$isharassment2)
+(sum(tweets.df$isharassment)/nrow(tweets.df))*100 # percent
+(sum(tweets.df$isharassment2)/nrow(tweets.df))*100 
+
+# See some of the tweets that contain any of the terms in the dictionary
+arrange(tweets.df, desc(isharassment))
+
+# See some of the tweets that contain any of the terms in the dictionary except "bitch"
+arrange(tweets.df, desc(isharassment2))
+
+# Clean up the location data
+## Replaces the more precise "lat" and "lon" with "place_lat" or "place_lon" if the more precise coordinates are missing
+tweets.df$lat = ifelse(is.na(tweets.df$lat), tweets.df$place_lat, tweets.df$lat)
+tweets.df$lon = ifelse(is.na(tweets.df$lon), tweets.df$place_lon, tweets.df$lon)
+
+
+# Save just the "harassment" tweets, with text and lat/lon, to a file
+harassmentdata = subset(tweets.df, isharassment==1, select=(c(text, lat, lon)))
+save(harassmentdata, file="harassmentdata.RData")
+```
+
+### Wrap everything up in a function 
+
+```{r define_func}
+extract_harassing_tweets_from_dict = function(file) {
+    filename = paste(file, ".json", sep = "") 
+    tweets.df = parseTweets(filename, verbose=TRUE)
+
+    # Use grepl to search for expressions in harassment.terms
+    results.df = sapply(harassment.terms, grepl, tweets.df$text, ignore.case=TRUE)
+    results.df = as.data.frame(results.df)
+    
+    # See results
+    summary(results.df)
+    
+    # Make syntactically valid column names
+    colnames(results.df) = make.names(colnames(results.df))
+    
+    # Merge results back into the dataframe (tweets.df and results.df should have same N)
+    tweets.df = cbind(tweets.df, results.df)
+    
+    # Create a flag if the tweets contains any instance of harassment
+    tweets.df$isharassment <- rowSums(tweets.df[,make.names(harassment.terms)])
+    tweets.df$isharassment <- ifelse(tweets.df$isharassment>0,1,0)
+    
+    # Create a flag if the tweets contains any instance of harassment except "bitch"
+    terms = harassment.terms[-1]
+    tweets.df$isharassment2 <- rowSums(tweets.df[,make.names(terms)])
+    tweets.df$isharassment2 <- ifelse(tweets.df$isharassment2>0,1,0)
+
+    # Clean up the location data
+    ## Replaces the more precise "lat" and "lon" with "place_lat" or "place_lon" if the more precise coordinates are missing
+    tweets.df$lat = ifelse(is.na(tweets.df$lat), tweets.df$place_lat, tweets.df$lat)
+    tweets.df$lon = ifelse(is.na(tweets.df$lon), tweets.df$place_lon, tweets.df$lon)
+    
+    # Save just the "harassment" tweets, with text and lat/lon, to a file
+    harassmentdata = subset(tweets.df, isharassment==1, select=(c(text, lat, lon)))
+    filename <- paste(file, "_htweets.RData", sep = "") 
+    save(harassmentdata, file=filename)
+}
+```
+
+### Apply the new function to a file
+```{r apply}
+# extract_harassing_tweets_from_dict("tweets.json")
+# extract_harassing_tweets_from_dict("tweets_sept17")
+extract_harassing_tweets_from_dict("tweets_sept17_2")
+extract_harassing_tweets_from_dict("tweets_sept17_3")
+extract_harassing_tweets_from_dict("tweets_sept17_4")
+extract_harassing_tweets_from_dict("tweets_sept17_6")
+extract_harassing_tweets_from_dict("tweets2")
+extract_harassing_tweets_from_dict("tweets3")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
